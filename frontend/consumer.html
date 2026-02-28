@@ -1494,6 +1494,110 @@ const WeatherJS = {
 };
 
 /* ============================================================
+   REAL WEATHER — Open-Meteo + Geolocation
+   Logic from weather.js spec (weatherToPrice + fetchWeather + init)
+   ============================================================ */
+const BASE_PRICE = 0.10; // $/kWh  (from spec)
+
+// Maps a weather string + demand/supply to a real price factor (exact spec logic)
+function weatherToPrice(basePrice, weather, demand = 1, supply = 1) {
+  let factor = 1;
+  switch (weather.toLowerCase()) {
+    case 'rain':   factor = 1.8; break; // low solar → price spikes
+    case 'clouds': factor = 1.2; break; // moderate solar → price rises
+    case 'clear':  factor = 0.9; break; // sunny → price drops
+    default:       factor = 1.0;
+  }
+  return parseFloat((basePrice * (demand / supply) * factor).toFixed(4));
+}
+
+// Maps Open-Meteo weathercode → internal weather name used by the dashboard
+function codeToWeather(code) {
+  if ([61,63,65,66,67,80,81,82,95,96,99].includes(code)) return 'Rain';
+  if ([1,2,3,45,48,51,53,55,71,73,75,77].includes(code)) return 'Clouds';
+  return 'Clear'; // code 0 and others
+}
+
+// Maps internal weather name → VoltLayer display weather name + multipliers
+function realWeatherToVolt(realWeather) {
+  switch (realWeather) {
+    case 'Rain':   return 'Storm';    // rain → storm conditions
+    case 'Clouds': return 'Cloudy';   // clouds → cloudy
+    case 'Clear':  return 'Sunny';    // clear → sunny
+    default:       return 'Sunny';
+  }
+}
+
+// Fetch real weather from Open-Meteo and update market state
+async function fetchWeather(lat, lon) {
+  try {
+    const res  = await fetch(
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true`
+    );
+    const data = await res.json();
+    const code = data.current_weather.weathercode;
+    const temp = data.current_weather.temperature;
+
+    const realWeather  = codeToWeather(code);       // 'Rain' | 'Clouds' | 'Clear'
+    const voltWeather  = realWeatherToVolt(realWeather); // 'Storm' | 'Cloudy' | 'Sunny' | …
+
+    // Simulate supply & demand (same as spec)
+    const demand = Math.random() * 2 + 0.5;
+    const supply = Math.random() * 2 + 0.5;
+
+    // Set market state from REAL weather
+    Mkt.weather   = voltWeather;
+    Mkt.realLabel = `${realWeather} · ${temp}°C`; // shown in weather panel
+    Mkt.realTemp  = temp;
+
+    // Override price using spec's weatherToPrice formula
+    const realPrice = weatherToPrice(BASE_PRICE, realWeather, demand, supply);
+
+    // Run normal recalc (uses Mkt.weather for multipliers/supply/demand)
+    marketRecalc();
+
+    // Blend spec price into market price for authenticity
+    // Use the real weather-derived price as the authoritative market price
+    Mkt.price = realPrice;
+    Mkt.priceHistory[Mkt.priceHistory.length - 1] = realPrice; // patch last entry
+
+    Mkt.tick++;
+    renderAll();
+  } catch (err) {
+    console.error('Weather fetch error:', err);
+    // Fallback: run normal sim tick without changing weather
+    marketRecalc();
+    Mkt.tick++;
+    renderAll();
+  }
+}
+
+// Geolocation init — exact logic from spec
+function initWeather() {
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const lat = position.coords.latitude;
+        const lon = position.coords.longitude;
+        fetchWeather(lat, lon);
+        setInterval(() => fetchWeather(lat, lon), 10000); // update every 10s
+      },
+      (error) => {
+        console.error('Geolocation error:', error);
+        // Fallback to simulated weather if location denied
+        Mkt.realLabel = 'Location denied · simulated';
+        marketTick();
+        setInterval(marketTick, 10000);
+      }
+    );
+  } else {
+    Mkt.realLabel = 'Geolocation not supported · simulated';
+    marketTick();
+    setInterval(marketTick, 10000);
+  }
+}
+
+/* ============================================================
    MARKET CONTEXT (shared simulation engine)
    ============================================================ */
 const BASE_RATE = 0.12;
@@ -1557,9 +1661,8 @@ function marketRecalc() {
 }
 
 function marketTick() {
-  if (Mkt.tick % 3 === 0) {
-    Mkt.weather = WEATHERS[Math.floor(Math.random() * WEATHERS.length)];
-  }
+  // Weather is set by fetchWeather() via real geolocation + Open-Meteo.
+  // This fallback runs only if geolocation is unavailable.
   marketRecalc();
   Mkt.tick++;
   renderAll();
@@ -1712,9 +1815,16 @@ function renderWeather() {
   const w = Mkt.weather;
   const icons = WeatherJS.icons;
   const descs = WeatherJS.descriptions;
+
   set('wp-icon', icons[w]);
-  set('wp-name', w);
-  set('wp-sub',  descs[w] || '');
+  // Show real weather label (e.g. "Rain · 27°C") if available, else volt weather name
+  set('wp-name', Mkt.realLabel ? Mkt.realLabel.split(' · ')[0] + ' · ' + w : w);
+  // Sub-line: real temp + condition description
+  const tempStr = (Mkt.realTemp !== undefined) ? `${Mkt.realTemp}°C · ` : '';
+  set('wp-sub', tempStr + (descs[w] || ''));
+  // Ticker weather: show real label if available
+  set('tk-weather', icons[w] + ' ' + (Mkt.realLabel || w));
+
   set('weather-badge-right', icons[w] + ' ' + w);
   document.getElementById('weather-badge-right').style.background = 'rgba(240,165,0,0.1)';
 
@@ -1735,12 +1845,12 @@ function renderWeather() {
   setMcStyle('mc-wind', m.wind);
   setMcStyle('mc-bio', m.biogas);
 
-  // Wind spin speed
+  // Wind spin speed — faster in Storm (real Rain maps to Storm)
   document.querySelectorAll('.pw-spin').forEach(el => {
     el.style.animationDuration = w === 'Storm' ? '0.5s' : '3s';
   });
 
-  // Solar dim if storm
+  // Solar dim if storm/rain
   document.querySelectorAll('.ps').forEach(el => {
     el.style.opacity = (w === 'Storm') ? '0.4' : '1';
   });
@@ -2089,8 +2199,10 @@ function style(id, p, v)   { const e = document.getElementById(id); if(e) e.styl
    BOOTSTRAP
    ============================================================ */
 spawnParticles();
-marketTick();
-setInterval(marketTick, 10000);
+// initWeather() requests geolocation → calls fetchWeather(lat, lon) every 10s
+// fetchWeather sets Mkt.weather from real Open-Meteo data, then calls renderAll()
+// Fallback to simulated marketTick if geolocation is blocked
+initWeather();
 </script>
 </body>
 </html>
