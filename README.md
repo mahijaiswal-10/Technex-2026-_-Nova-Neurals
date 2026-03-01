@@ -11,6 +11,8 @@ Mahi Jaiswal
 
 Pratikshya Dash
 
+DEPLOYED LINK - nexusenergy-production.up.railway.app
+
 🌱 Renewable Energy Marketplace Portal
 
 A decentralized, climate-adaptive web platform that connects renewable energy producers (solar rooftop owners, wind farms, biogas plants) with consumers and investors through a dynamic peer-to-peer trading engine.
