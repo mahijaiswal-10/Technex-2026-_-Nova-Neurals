@@ -1,5 +1,6 @@
 🌍 Technex-2026 – Nova Neurals
 Renewable Energy Marketplace Portal
+
 👥 Team Members
 
 Arya Lunawat
